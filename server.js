@@ -1,19 +1,150 @@
-const express=require('express');const axios=require('axios');const cors=require('cors');const crypto=require('crypto');
-const app=express();app.use(express.json());app.use(cors());
-const PAYSTACK_SECRET=process.env.PAYSTACK_SECRET;
-const VTPASS_USER=process.env.VTPASS_USER;const VTPASS_PASS=process.env.VTPASS_PASS;
-const VTPASS_URL=process.env.VTPASS_URL||'https://sandbox.vtpass.com/api/pay';
-function ph(){return {Authorization:`Bearer ${PAYSTACK_SECRET}`,'Content-Type':'application/json'};}
-function makeToken(p){return Buffer.from(p+":"+Date.now()).toString('base64');}
-let backendUsers=[{name:"UDEME AKPANUDOM",phone:"09038622246",email:"clevelup@gmail.com",pass:"123456",pin:"1234",balance:0}];
-app.get('/',(req,res)=>res.json({status:"ClevelUp Backend Running ✅",paystack:PAYSTACK_SECRET?"Connected":"Missing PAYSTACK_SECRET",vtpass:VTPASS_USER?"Connected":"Missing VTPASS",endpoints:["/register","/login","/withdraw","/send","/airtime","/create-account","/verify-payment","/resolve-account","/webhook"]}));
-app.post('/register',async(req,res)=>{try{let{name,phone,email,pass,pin}=req.body;if(!name||!phone||!email||!pass||!pin) return res.json({success:false,message:"Fill all"});if(backendUsers.find(u=>u.phone===phone)) return res.json({success:false,message:"Phone don already register!"});let nu={name:name.toUpperCase(),phone,email,pass,pin,balance:0,created:new Date().toISOString()};backendUsers.push(nu);res.json({success:true,token:makeToken(phone),user:{name:nu.name,phone,email,pin,balance:0}});}catch(e){res.json({success:false,message:"Register failed"});}});
-app.post('/login',async(req,res)=>{try{let{phone,pass}=req.body;let u=backendUsers.find(x=>x.phone===phone&&x.pass===pass);if(!u) return res.json({success:false,message:"Wrong phone or password"});res.json({success:true,token:makeToken(phone),user:{name:u.name,phone:u.phone,email:u.email,pin:u.pin,balance:u.balance}});}catch(e){res.json({success:false,message:"Login failed"});}});
-app.get('/verify-payment/:reference',async(req,res)=>{try{let r=await axios.get(`https://api.paystack.co/transaction/verify/${req.params.reference}`,{headers:ph()});if(r.data.data.status==="success") res.json({success:true,amount:r.data.data.amount/100,email:r.data.data.customer.email});else res.json({success:false,message:"Payment not successful"});}catch(e){res.json({success:false,message:"Cannot verify"});}});
-app.get('/resolve-account',async(req,res)=>{try{let{account_number,bank_code}=req.query;let r=await axios.get(`https://api.paystack.co/bank/resolve?account_number=${account_number}&bank_code=${bank_code}`,{headers:ph()});res.json({success:true,account_name:r.data.data.account_name});}catch(e){res.json({success:false,message:e.response?.data?.message||"Cannot resolve"});}});
-app.post('/withdraw',async(req,res)=>{try{let{name,account_number,bank_code,amount}=req.body;let recipient=await axios.post('https://api.paystack.co/transferrecipient',{type:"nuban",name,account_number,bank_code,currency:"NGN"},{headers:ph()});let transfer=await axios.post('https://api.paystack.co/transfer',{source:"balance",amount:amount*100,recipient:recipient.data.data.recipient_code,reason:"ClevelUp Withdraw to "+name},{headers:ph()});res.json({success:true,reference:transfer.data.data.reference});}catch(e){res.json({success:false,message:e.response?.data?.message||"Paystack error - Check Paystack balance"});}});
-app.post('/send',async(req,res)=>{try{let{name,account_number,bank_code,amount}=req.body;let recipient=await axios.post('https://api.paystack.co/transferrecipient',{type:"nuban",name,account_number,bank_code,currency:"NGN"},{headers:ph()});let transfer=await axios.post('https://api.paystack.co/transfer',{source:"balance",amount:amount*100,recipient:recipient.data.data.recipient_code,reason:"ClevelUp Send to "+name},{headers:ph()});res.json({success:true,reference:transfer.data.data.reference});}catch(e){res.json({success:false,message:e.response?.data?.message});}});
-app.post('/airtime',async(req,res)=>{try{let{phone,network,amount}=req.body;if(!VTPASS_USER) return res.json({success:false,message:"VTPass not configured"});let map={"MTN":"mtn","GLO":"glo","AIRTEL":"airtel","9MOBILE":"etisalat"};let response=await axios.post(VTPASS_URL,{request_id:"CLV-AIR-"+Date.now(),serviceID:map[network]||"mtn",amount,phone},{auth:{username:VTPASS_USER,password:VTPASS_PASS}});if(response.data.code==="000") res.json({success:true,reference:response.data.content.transactions.transactionId});else res.json({success:false,message:response.data.response_description});}catch(e){res.json({success:false,message:"Airtime failed - Check VTPass balance"});}});
-app.post('/create-account',async(req,res)=>{try{let{email,first_name,last_name,phone}=req.body;let cust=await axios.post('https://api.paystack.co/customer',{email,first_name,last_name,phone},{headers:ph()});let acct=await axios.post('https://api.paystack.co/dedicated_account',{customer:cust.data.data.customer_code,preferred_bank:"wema-bank"},{headers:ph()});res.json({success:true,account:acct.data.data});}catch(e){res.json({success:false,message:e.response?.data?.message});}});
-app.post('/webhook',express.raw({type:'application/json'}),(req,res)=>{try{let hash=crypto.createHmac('sha512',PAYSTACK_SECRET).update(req.body).digest('hex');if(hash!==req.headers['x-paystack-signature']) return res.sendStatus(401);let event=JSON.parse(req.body.toString());if(event.event==='charge.success') console.log("💰 MONEY ENTER:",event.data.amount/100,event.data.customer.email);res.sendStatus(200);}catch(e){res.sendStatus(200);}});
-const PORT=process.env.PORT||10000;app.listen(PORT,()=>console.log("✅ ClevelUp Backend Running "+PORT));
+// ClevelUp Supa App - Backend for Render + Paystack
+// Owner: UDEME AKPANUDOM | Opay: 9038622246
+const express = require('express');
+const cors = require('cors');
+const axios = require('axios');
+const crypto = require('crypto');
+require('dotenv').config();
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET_KEY;
+
+let DB = {
+  users: {
+    "09038622246": { name: "UDEME AKPANUDOM", phone: "09038622246", pass: "123456", balance: 5000, email: "udeme.clevelup@gmail.com" }
+  },
+  transactions: [],
+  orders: [],
+  withdraws: []
+};
+
+function logTx(phone, title, amount, type, ref=""){
+  let tx = { id: Date.now().toString(), phone, title, amount, type, ref, date: new Date().toLocaleString(), status: "success" };
+  DB.transactions.unshift(tx);
+  return tx;
+}
+
+app.get('/', (req, res) => {
+  res.json({ status: "✅ ClevelUp Backend Live!", owner: "UDEME AKPANUDOM", paystack: PAYSTACK_SECRET ? "Connected" : "NO KEY" });
+});
+
+app.get('/api/user/:phone', (req, res) => {
+  let u = DB.users[req.params.phone];
+  if(!u) return res.json({ success: false, msg: "User not found" });
+  let txs = DB.transactions.filter(t => t.phone === req.params.phone).slice(0,50);
+  res.json({ success: true, user: { name: u.name, phone: u.phone, balance: u.balance }, transactions: txs });
+});
+
+app.post('/api/register', (req, res) => {
+  let { name, phone, pass, email } = req.body;
+  if(!name || !phone || !pass) return res.json({ success: false, msg: "Fill all" });
+  if(DB.users[phone]) return res.json({ success: false, msg: "Phone don register!" });
+  DB.users[phone] = { name: name.toUpperCase(), phone, pass, email: email||"", balance: 0 };
+  res.json({ success: true, user: DB.users[phone] });
+});
+
+app.post('/api/login', (req, res) => {
+  let { phone, pass } = req.body;
+  let u = DB.users[phone];
+  if(!u || u.pass !== pass) return res.json({ success: false, msg: "Wrong phone/password" });
+  res.json({ success: true, user: { name: u.name, phone: u.phone, balance: u.balance } });
+});
+
+app.post('/api/fund/init', async (req, res) => {
+  let { phone, amount, email } = req.body;
+  if(!amount || amount < 100) return res.json({ success: false, msg: "Min ₦100" });
+  try{
+    let resp = await axios.post('https://api.paystack.co/transaction/initialize', {
+      email: email || "udeme.clevelup@gmail.com",
+      amount: amount * 100,
+      metadata: { phone, purpose: "ClevelUp Wallet Funding" },
+      callback_url: process.env.FRONTEND_URL + "/?paid=" + phone
+    }, { headers: { Authorization: `Bearer ${PAYSTACK_SECRET}`, 'Content-Type': 'application/json' } });
+    res.json({ success: true, auth_url: resp.data.data.authorization_url, reference: resp.data.data.reference });
+  }catch(e){ res.json({ success: false, msg: e.response?.data?.message || e.message }); }
+});
+
+app.get('/api/fund/verify/:reference', async (req, res) => {
+  try{
+    let resp = await axios.get(`https://api.paystack.co/transaction/verify/${req.params.reference}`, { headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` } });
+    let data = resp.data.data;
+    if(data.status !== "success") return res.json({ success: false, msg: "Payment not successful" });
+    let phone = data.metadata.phone;
+    let amount = data.amount / 100;
+    if(DB.transactions.find(t => t.ref === req.params.reference)) return res.json({ success: true, msg: "Already credited", amount, phone });
+    if(DB.users[phone]) DB.users[phone].balance += amount;
+    logTx(phone, "Add Money - Paystack - " + req.params.reference, amount, "add", req.params.reference);
+    res.json({ success: true, amount, phone, newBalance: DB.users[phone]?.balance });
+  }catch(e){ res.json({ success: false, msg: e.message }); }
+});
+
+app.post('/api/send', (req, res) => {
+  let { fromPhone, toPhone, amount } = req.body;
+  let sender = DB.users[fromPhone];
+  let receiver = DB.users[toPhone] || DB.users[Object.keys(DB.users).find(k => DB.users[k].name === toPhone?.toUpperCase())];
+  if(!sender) return res.json({ success: false, msg: "Sender not found" });
+  if(!receiver) return res.json({ success: false, msg: "Receiver not found" });
+  if(sender.balance < amount) return res.json({ success: false, msg: "Balance no reach!" });
+  sender.balance -= amount; receiver.balance += amount;
+  logTx(fromPhone, `Sent to ${receiver.name}`, amount, "send", "SEND_"+Date.now());
+  logTx(receiver.phone, `Received from ${sender.name}`, amount, "add", "RECV_"+Date.now());
+  res.json({ success: true, msg: `Sent ₦${amount} to ${receiver.name}`, newBalance: sender.balance });
+});
+
+app.post('/api/withdraw', async (req, res) => {
+  let { phone, accountName, accountNumber, bankCode, amount } = req.body;
+  let u = DB.users[phone];
+  if(!u) return res.json({ success: false, msg: "User not found" });
+  if(amount + 50 > u.balance) return res.json({ success: false, msg: `Need ₦${amount+50} (Fee ₦50)` });
+  let wd = { id: Date.now().toString(), phone, accountName, accountNumber, bankCode, amount, fee: 50, status: "PENDING", date: new Date().toLocaleString() };
+  DB.withdraws.unshift(wd);
+  u.balance -= (amount + 50);
+  logTx(phone, `Withdraw to ${accountName} - ${accountNumber}`, amount, "send", wd.id);
+  res.json({ success: true, msg: `Withdraw ₦${amount} saved! You go receive in 5-10 mins.`, withdraw: wd, newBalance: u.balance });
+});
+
+app.post('/api/airtime', (req, res) => {
+  let { phone, targetPhone, network, amount } = req.body;
+  let u = DB.users[phone];
+  if(!u || u.balance < amount) return res.json({ success: false, msg: "Balance no reach!" });
+  u.balance -= amount;
+  logTx(phone, `Airtime ${network} - ${targetPhone}`, amount, "send", "AIR_"+Date.now());
+  res.json({ success: true, msg: `Airtime ₦${amount} for ${targetPhone} (${network}) saved!`, newBalance: u.balance });
+});
+
+app.post('/api/order', (req, res) => {
+  let { phone, items, total, name, address } = req.body;
+  let u = DB.users[phone];
+  if(!u || u.balance < total) return res.json({ success: false, msg: "Balance no reach!" });
+  u.balance -= total;
+  let order = { id: Date.now().toString(), phone, items, total, name, address, status: "PENDING", date: new Date().toLocaleString() };
+  DB.orders.unshift(order);
+  logTx(phone, `Shop Order - ${items.length} items`, total, "send", order.id);
+  res.json({ success: true, order, newBalance: u.balance });
+});
+
+app.post('/api/webhook/paystack', (req, res) => {
+  let hash = crypto.createHmac('sha512', PAYSTACK_SECRET).update(JSON.stringify(req.body)).digest('hex');
+  if(hash !== req.headers['x-paystack-signature']) return res.sendStatus(400);
+  let event = req.body;
+  if(event.event === "charge.success"){
+    let data = event.data;
+    let phone = data.metadata?.phone;
+    let amount = data.amount / 100;
+    if(phone && DB.users[phone] && !DB.transactions.find(t => t.ref === data.reference)){
+      DB.users[phone].balance += amount;
+      logTx(phone, "Add Money - Paystack Webhook", amount, "add", data.reference);
+    }
+  }
+  res.sendStatus(200);
+});
+
+app.get('/api/admin/withdraws', (req, res) => res.json(DB.withdraws));
+app.get('/api/admin/orders', (req, res) => res.json(DB.orders));
+app.get('/api/admin/users', (req, res) => res.json(Object.values(DB.users)));
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`🚀 ClevelUp Backend running on port ${PORT}`));
